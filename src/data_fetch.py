@@ -7,7 +7,7 @@ os.makedirs('data', exist_ok=True)
 tickers = ['CL=F']        # Will add more later: 'NG=F', 'GC=F'
 
 data = yf.download(tickers, 
-                   start='2020-01-01', 
+                   start='2015-01-01', 
                    end='2025-12-31',
                    progress=False)
 
