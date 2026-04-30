@@ -7,7 +7,7 @@ import numpy as np
 os.makedirs('data', exist_ok=True)
 
 
-def generate_table(ticker_sym,start_date='2015-01-01',end_date='2025-12-31'):
+def generate_table(ticker_sym,start_date='2005-01-01',end_date='2025-12-31'):
        # Will add more later: 'NG=F', 'GC=F'
 
     df = yf.download(ticker_sym, 
