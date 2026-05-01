@@ -16,26 +16,11 @@ def generate_table(ticker_sym,start_date='2005-01-01',end_date='2025-12-31'):
                     progress=False,
                     interval='1d')
 
-    # vix_df=yf.download('^VIX', 
-    #                 start=start_date, 
-    #                 end=end_date,
-    #                 progress=False,
-    #                 interval='1d')
-    
-    # ovx_df=yf.download('^OVX', 
-    #                 start=start_date, 
-    #                 end=end_date,
-    #                 progress=False,
-    #                 interval='1d')
-    
-
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
 
     df = df.reset_index()
     df['Ticker']=ticker_sym
-    # df['vix_closing']=vix_df['Close']
-    # df['ovx_closing']=ovx_df['Close']
 
     df.rename(columns={'Datetime': 'timestamp', 'Date': 'timestamp'}, inplace=True)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
