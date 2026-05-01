@@ -45,9 +45,9 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.features import load_raw, build_features
-from src.targets import build_targets_a, build_targets_b
-from src.splits import fixed_split, WalkForward
-from src.metrics import summarize_per_target, regression_report, classification_report
+from src.prediction.targets import build_targets_a, build_targets_b
+from src.prediction.splits import fixed_split, WalkForward
+from src.prediction.metrics import summarize_per_target, regression_report, classification_report
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +283,7 @@ def walk_forward_predict(
 # CLI
 # ---------------------------------------------------------------------------
 def _run(option: str, csv_path: str, n_trials: int, train_end: str,
-         val_end: str, retrain_step: str) -> pd.DataFrame:
+         val_end: str) -> pd.DataFrame:
     print(f"\n========== Option {option.upper()} ==========")
     raw = load_raw(csv_path)
     print(f"Raw rows: {len(raw)}  ({raw.index.min().date()} -> {raw.index.max().date()})")
@@ -304,20 +304,26 @@ def _run(option: str, csv_path: str, n_trials: int, train_end: str,
         params_per_target[tcol] = best
         print(f" best_rmse={best['best_rmse']:.6f}  best_iter={best['best_iteration']}")
 
-    print(f"\n[2/3] Walk-forward predicting backtest period (retrain={retrain_step})")
-    preds = walk_forward_predict(
-        X, Y, backtest_idx=sp.backtest,
-        params_per_target=params_per_target,
-        step=retrain_step,
-        target_cols=target_cols,
-    )
+    # Fit final model on all pre-backtest data (train + val combined).
+    # The backtest period (2024-today) is never seen during training — clean OOS test.
+    pre_backtest = sp.train.append(sp.val)
+    X_pre = X.loc[pre_backtest]
+    Y_pre = Y.loc[pre_backtest]
 
-    print(f"\n[3/3] Metrics on backtest period ({len(preds)} predictions)")
+    print(f"\n[2/3] Fitting final model on pre-backtest data "
+          f"({pre_backtest.min().date()} -> {pre_backtest.max().date()}, n={len(pre_backtest)})")
+    models = fit_models(X_pre, Y_pre, params_per_target, target_cols=target_cols)
+
+    X_bt = X.loc[sp.backtest]
+    preds = predict(models, X_bt)
+
+    print(f"\n[3/3] Backtest metrics  "
+          f"({sp.backtest.min().date()} -> {sp.backtest.max().date()}, "
+          f"n={len(preds)} predictions)")
     Y_bt = Y.loc[preds.index]
     summary = summarize_per_target(Y_bt, preds)
     print(summary.to_string(index=False))
 
-    # Save predictions for later use
     out_path = f"data/preds_lgbm_option_{option}.csv"
     preds.to_csv(out_path)
     print(f"\nSaved predictions to {out_path}")
@@ -331,14 +337,12 @@ def main():
     p.add_argument("--n-trials", type=int, default=30)
     p.add_argument("--train-end", default="2022-12-31")
     p.add_argument("--val-end", default="2023-12-31")
-    p.add_argument("--retrain-step", default="ME",
-                   help="Pandas freq alias for walk-forward retraining (ME, W, QE)")
     args = p.parse_args()
 
     if args.option in ("a", "both"):
-        _run("a", args.csv_path, args.n_trials, args.train_end, args.val_end, args.retrain_step)
+        _run("a", args.csv_path, args.n_trials, args.train_end, args.val_end)
     if args.option in ("b", "both"):
-        _run("b", args.csv_path, args.n_trials, args.train_end, args.val_end, args.retrain_step)
+        _run("b", args.csv_path, args.n_trials, args.train_end, args.val_end)
 
 
 if __name__ == "__main__":
