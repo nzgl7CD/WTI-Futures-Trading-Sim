@@ -4,50 +4,6 @@ import matplotlib.pyplot as plt
 import data_fetch
 from datetime import datetime, timedelta
 
-import pandas as pd
-import numpy as np
-
-def create_mock_preds(
-    start_date: str = "2024-01-01",
-    periods: int = 250,
-    random_seed: int = 42
-) -> pd.DataFrame:
-    """
-    Creates a mock predictions DataFrame that closely matches 
-    the output of your walk_forward_predict() function.
-    """
-    np.random.seed(random_seed)
-    
-    dates = pd.date_range(start=start_date, periods=periods, freq='B')   # Business days
-    
-    # Generate realistic predicted next-day returns
-    predicted_a = np.random.normal(0.0006, 0.009, periods)   # slight positive bias
-    predicted_a = np.clip(predicted_a, -0.045, 0.045)
-    
-
-
-    # Create DataFrame with timestamp as INDEX (most important!)
-    preds = pd.DataFrame({
-        'timestamp': dates,
-        'target_a_close': predicted_a,
-        # 'target_b_close': predicted_a * 1.05,     # uncomment if you use option b
-    }, index=dates)
-    
-    preds = preds.set_index('timestamp')
-
-    # Add direction columns (your model does this automatically)
-    preds['target_a_direction'] = (preds['target_a_close'] > 0).astype(int)
-    # preds['target_b_direction'] = (preds['target_b_close'] > 0).astype(int)
-    
-    print(f"Mock preds created: {len(preds)} rows")
-    print(f"Index type      : {type(preds.index)}")
-    print(f"Columns         : {list(preds.columns)}")
-    print("\nFirst 5 rows:")
-    print(preds.head())
-    
-    return preds
-
-
 def generate_trading_signals(
     predictions: pd.DataFrame,
     threshold: float = 0.0002,      # 0.2% predicted move as default TODO: test with 0.0015, 0.001, 0.0005 
@@ -65,17 +21,18 @@ def generate_trading_signals(
         raise ValueError("Could not find predicted return column")
     
     signals['signal'] = 0
-    
-    signals.loc[signals[pred_col] > threshold, 'signal'] = 1     
+
+    signals.loc[signals[pred_col] > threshold, 'signal'] = 1
     if allow_short:
-        signals.loc[signals[pred_col] < -threshold, 'signal'] = -1   
-    
+        signals.loc[signals[pred_col] < -threshold, 'signal'] = -1
+
     signals['predicted_return'] = signals[pred_col]
-    signals['position'] = signals['signal'] * position_size
-    
+    signals['position_size'] = position_size
+    signals['position'] = signals['signal'] * signals['position_size']
+
     signals['direction'] = np.where(signals['signal'] == 1, 'LONG',
                           np.where(signals['signal'] == -1, 'SHORT', 'FLAT'))
-    
+
     return signals
 
 
@@ -98,7 +55,7 @@ def backtest_strategy(
         raise ValueError(f"No data found for {ticker}. Available: {price_data['Ticker'].unique()}")
 
     prices = prices[['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
-    prices['timestamp'] = pd.to_datetime(prices['timestamp']).dt.tz_localize(None)  # Remove timezone if any
+    prices['timestamp'] = pd.to_datetime(prices['timestamp']).dt.tz_localize(None)
     prices = prices.set_index('timestamp').sort_index()
 
     df = signals.copy()
@@ -169,13 +126,15 @@ def backtest_strategy(
 
         if not stop_loss_triggered:
             if signal == 1 and position == 0:
-                position = int(row.get('position', 1))
+                size = float(row.get('position_size', row.get('position', 1.0)))
+                position = size
                 entry_price = price
                 commission = commission_per_contract * abs(position)
                 capital -= commission
 
             elif signal == -1 and position == 0:
-                position = -int(row.get('position', 1))
+                size = float(row.get('position_size', abs(row.get('position', 1.0))))
+                position = -size
                 entry_price = price
                 commission = commission_per_contract * abs(position)
                 capital -= commission
@@ -222,12 +181,13 @@ for ticker in tickers:
     all_dfs.append(data_fetch.generate_table(ticker_sym=ticker))
 final_df=pd.concat(all_dfs, ignore_index=True)
 print(final_df.columns)
-preds = create_mock_preds(periods=300, start_date='2024-01-01')
+# preds = create_mock_preds(periods=300, start_date='2024-01-01')
+preds=pd.DataFrame(pd.read_csv('data\preds_lgbm_option_a.csv', parse_dates=['timestamp']))
 
 trading_signals = generate_trading_signals(
-    predictions=preds, # Need from Patrick's model
-    threshold=0.0015,      
-    position_size=1.0,
+    predictions=preds,
+    threshold=0.00015,      
+    position_size=1,
     allow_short=True
 )
 
@@ -240,8 +200,8 @@ backtest_results, trade_log = backtest_strategy(
     commission_per_contract=1.5 # We can adjust if needed
 )
 
-print(preds.head(10))
-print(trading_signals[['predicted_return', 'signal', 'direction']].head(10))
+# print(preds.head(10))
+# print(trading_signals[['predicted_return', 'signal', 'direction']].head(10))
 
 plt.figure(figsize=(12, 6))
 plt.plot(backtest_results['timestamp'], backtest_results['equity'])
