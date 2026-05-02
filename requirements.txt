@@ -22,6 +22,9 @@ optuna>=3.0.0
 # For better development
 jupyter>=1.0.0
 
+meteostat
+eia
+requests
 # Optional / Future use
 # scikit-learn>=1.3.0
 # plotly>=5.0.0

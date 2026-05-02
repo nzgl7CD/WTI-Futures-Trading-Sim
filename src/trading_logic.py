@@ -6,8 +6,7 @@ from datetime import datetime, timedelta
 
 def generate_trading_signals(
     predictions: pd.DataFrame,
-    threshold: float = 0.0002,      # 0.2% predicted move as default TODO: test with 0.0015, 0.001, 0.0005 
-    position_size: float = 1.0,    
+    threshold: float = 0.002,
     allow_short: bool = True
 ) -> pd.DataFrame:
     
@@ -27,14 +26,10 @@ def generate_trading_signals(
         signals.loc[signals[pred_col] < -threshold, 'signal'] = -1
 
     signals['predicted_return'] = signals[pred_col]
-    signals['position_size'] = position_size
-    signals['position'] = signals['signal'] * signals['position_size']
-
     signals['direction'] = np.where(signals['signal'] == 1, 'LONG',
                           np.where(signals['signal'] == -1, 'SHORT', 'FLAT'))
 
     return signals
-
 
 def backtest_strategy(
     signals: pd.DataFrame,
@@ -43,44 +38,34 @@ def backtest_strategy(
     multiplier: int = 1000,
     commission_per_contract: float = 2.5,
     initial_capital: float = 100_000,
-    stop_loss_pct: float = 0.10
+    stop_loss_pct: float = 0.10,
+    risk_per_trade: float = 0.01
 ):
-    """
-    Robust backtester - Fixed for column names and merge issues.
-    """
-    print(f"Backtesting on {ticker} ...")
+    # print(f"Backtesting {ticker} with {stop_loss_pct*100}% stop-loss...")
 
     prices = price_data[price_data['Ticker'] == ticker].copy()
     if prices.empty:
-        raise ValueError(f"No data found for {ticker}. Available: {price_data['Ticker'].unique()}")
+        raise ValueError(f"No data for {ticker}")
 
     prices = prices[['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume']].copy()
     prices['timestamp'] = pd.to_datetime(prices['timestamp']).dt.tz_localize(None)
     prices = prices.set_index('timestamp').sort_index()
 
     df = signals.copy()
-    if isinstance(df.index, pd.DatetimeIndex):
-        df = df.reset_index()                    # Make 'timestamp' a column
-    elif 'timestamp' not in df.columns:
-        raise ValueError("Signals must have 'timestamp' column or DatetimeIndex")
-
+    if 'timestamp' not in df.columns:
+        df = df.reset_index()
     df['timestamp'] = pd.to_datetime(df['timestamp']).dt.tz_localize(None)
 
     df = df.merge(prices, on='timestamp', how='left')
-
     df = df.dropna(subset=['Close']).reset_index(drop=True)
 
-    if len(df) == 0:
-        raise ValueError("No matching dates between signals and price data!")
-
-    print(f"Successfully merged {len(df)} rows for backtesting.")
-
-    # ====================== Backtest Loop ======================
     capital = float(initial_capital)
-    position = 0
-    entry_price = 0.0
+    position = 0                    # net contracts (positive = long, negative = short)
+    entry_prices = []               # List to track all entry prices for averaging
     equity_curve = []
+    trade_log = []
     total_commissions = 0.0
+    count_stop_loss=0
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -89,70 +74,60 @@ def backtest_strategy(
 
         realized_pnl = 0.0
         commission = 0.0
-        stop_loss_triggered = False
 
-        if position != 0:
-            if position > 0:
-                stop_price = entry_price * (1 - stop_loss_pct)
-                if float(row['Low']) <= stop_price:
-                    realized_pnl = (stop_price - entry_price) * position * multiplier
-                    commission = commission_per_contract * abs(position)
-                    capital += realized_pnl - commission
-                    position = 0
-                    entry_price = 0.0
-                    stop_loss_triggered = True
-            else:
-                stop_price = entry_price * (1 + stop_loss_pct)
-                if float(row['High']) >= stop_price:
-                    realized_pnl = (entry_price - stop_price) * abs(position) * multiplier
-                    commission = commission_per_contract * abs(position)
-                    capital += realized_pnl - commission
-                    position = 0
-                    entry_price = 0.0
-                    stop_loss_triggered = True
+        # === Stop Loss using Average Entry Price ===
+        if position != 0 and len(entry_prices) > 0:
+            avg_entry = sum(entry_prices) / len(entry_prices)
+            stop_price = avg_entry * (1 - stop_loss_pct) if position > 0 else avg_entry * (1 + stop_loss_pct)
+            
+            hit_stop = (position > 0 and price <= stop_price) or (position < 0 and price >= stop_price)
+            
+            if hit_stop:
+                count_stop_loss += 1
+                realized_pnl = (price - avg_entry) * position * multiplier
+                commission = commission_per_contract * abs(position)
+                capital += realized_pnl - commission
+                position = 0
+                entry_prices = []
+                trade_log.append({'timestamp': row['timestamp'], 'action': 'Stop Loss', 'price': price, 'pnl': realized_pnl})
 
-        if not stop_loss_triggered and position != 0 and (signal == 0 or signal != np.sign(position)):
-            if position > 0:
-                realized_pnl = (price - entry_price) * position * multiplier
-                action = 'Sell Long'
-            else:
-                realized_pnl = (entry_price - price) * abs(position) * multiplier
-                action = 'Cover Short'
-
+        # Close on opposite or flat signal
+        if position != 0 and ((signal == 0) or (signal != np.sign(position))):
+            avg_entry = sum(entry_prices) / len(entry_prices) if entry_prices else 0
+            realized_pnl = (price - avg_entry) * position * multiplier
             commission = commission_per_contract * abs(position)
             capital += realized_pnl - commission
             position = 0
-            entry_price = 0.0
+            entry_prices = []
 
-        if not stop_loss_triggered:
-            if signal == 1 and position == 0:
-                size = float(row.get('position_size', row.get('position', 1.0)))
-                position = size
-                entry_price = price
-                commission = commission_per_contract * abs(position)
-                capital -= commission
+        # Open / Add to position with capital-aware sizing
+        if position == 0 and signal != 0:
+            risk_amount = capital * risk_per_trade
+            stop_distance = price * stop_loss_pct
+            contracts = int(risk_amount / (stop_distance * multiplier))
+            contracts = max(1, min(contracts, 20))
 
-            elif signal == -1 and position == 0:
-                size = float(row.get('position_size', abs(row.get('position', 1.0))))
-                position = -size
-                entry_price = price
-                commission = commission_per_contract * abs(position)
-                capital -= commission
+            position = contracts if signal == 1 else -contracts
+            entry_prices = [price] * abs(contracts)   # All contracts at this price
+            commission = commission_per_contract * abs(position)
+            capital -= commission
+
+            action = 'Buy Long' if signal == 1 else 'Sell Short'
+            trade_log.append({'timestamp': row['timestamp'], 'action': action, 'price': price, 'size': abs(position)})
 
         # Calculate equity
-        unrealized_pnl = (price - entry_price) * position * multiplier if position != 0 else 0.0
-        current_equity = capital + unrealized_pnl
+        avg_entry = sum(entry_prices) / len(entry_prices) if entry_prices else 0
+        unrealized = (price - avg_entry) * position * multiplier if position != 0 else 0.0
+        current_equity = capital + unrealized
 
         equity_curve.append({
             'timestamp': row['timestamp'],
             'equity': current_equity,
+            'realized_pnl': realized_pnl,
             'position': position,
             'signal': signal,
             'close': price,
-            'unrealized_pnl': unrealized_pnl,
-            'realized_pnl': realized_pnl,
-            'commission': commission,
-            'stop_loss': stop_loss_triggered
+            'avg_entry': avg_entry
         })
 
         total_commissions += commission
@@ -162,55 +137,160 @@ def backtest_strategy(
     result['peak'] = result['equity'].cummax()
     result['drawdown_pct'] = (result['equity'] - result['peak']) / result['peak']
 
-    # Summary
-    print("\n" + "="*60)
-    print("BACKTEST SUMMARY")
-    print(f"Initial Capital     : ${initial_capital:,.0f}")
-    print(f"Final Equity        : ${result['equity'].iloc[-1]:,.2f}")
-    print(f"Total Return        : {result['cum_return'].iloc[-1]:.2%}")
-    print(f"Max Drawdown        : {result['drawdown_pct'].min():.2%}")
-    print(f"Total Commissions   : ${total_commissions:,.2f}")
-    print("="*60)
 
-    return result, pd.DataFrame()
+    return result, pd.DataFrame(trade_log)
+
+def calculate_performance_metrics(result: pd.DataFrame, initial_capital: float = 100000) -> dict:
+    """
+    Calculate key risk-adjusted metrics from backtest results.
+    """
+    final_equity = result['equity'].iloc[-1]
+    total_return = (final_equity / initial_capital) - 1
+    max_dd = result['drawdown_pct'].min()
+    
+    # Risk-adjusted ratios
+    return_to_dd = total_return / abs(max_dd) if max_dd != 0 else 0
+    adjusted_return_to_dd = total_return / abs(max_dd) if max_dd != 0 else 0
+    
+    # Sharpe Ratio (annualized, assuming 252 trading days)
+    daily_returns = result['equity'].pct_change().dropna()
+    sharpe = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252) if daily_returns.std() != 0 else 0
+    
+    metrics = {
+        'Total Return (%)': total_return * 100,
+        'Max Drawdown (%)': max_dd * 100,
+        'Return / Drawdown Ratio': return_to_dd,
+        'Sharpe Ratio': sharpe,
+        'Final Equity': final_equity,
+        'Number of Trades': len(result),
+        'Score': (total_return / abs(max_dd)) * sharpe * 0.7
+    }
+
+
+    if metrics['Score']>1.9 and max_dd>-0.5:
+    
+        print("\n" + "="*60)
+        print("PERFORMANCE METRICS")
+        print(f"Total Return          : {metrics['Total Return (%)']:.2f}%")
+        print(f"Max Drawdown          : {metrics['Max Drawdown (%)']:.2f}%")
+        print(f"Return / DD Ratio     : {metrics['Return / Drawdown Ratio']:.2f}")
+        print(f"Sharpe Ratio          : {metrics['Sharpe Ratio']:.2f}")
+        print(f"Final Equity          : ${metrics['Final Equity']:,.2f}")
+        print(f"Number of Trades      : {metrics['Number of Trades']}")
+        print(f"Score                 : {metrics['Score']:.2f}")
+        print("="*60)
+    
+    return metrics
+
+
 
 tickers = ['CL=F', 'NG=F', 'GC=F', 'ES=F', '^OVX', '^VIX']
 all_dfs = []
 
 for ticker in tickers:
     all_dfs.append(data_fetch.generate_table(ticker_sym=ticker))
+
+
 final_df=pd.concat(all_dfs, ignore_index=True)
-print(final_df.columns)
-# preds = create_mock_preds(periods=300, start_date='2024-01-01')
-preds=pd.DataFrame(pd.read_csv('data\preds_lgbm_option_a.csv', parse_dates=['timestamp']))
+preds=pd.DataFrame(pd.read_csv('data\preds_lgbm_option_b.csv', parse_dates=['timestamp']))
 
 trading_signals = generate_trading_signals(
     predictions=preds,
-    threshold=0.00015,      
-    position_size=1,
+    threshold=0.0031,      
     allow_short=True
 )
 
-backtest_results, trade_log = backtest_strategy(
+result, trade_log_df = backtest_strategy(
     signals=trading_signals,
     price_data=final_df,           
     ticker='CL=F',
     initial_capital=100_000,
     multiplier=1000,               
-    commission_per_contract=1.5 # We can adjust if needed
+    commission_per_contract=1.5,
+    stop_loss_pct=0.005,
+    risk_per_trade=0.01
 )
 
-# print(preds.head(10))
-# print(trading_signals[['predicted_return', 'signal', 'direction']].head(10))
+risk_levels = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 0.7, 0.8, 0.9, 1]
+stop_loss_levels = [0.03, 0.05, 0.1, 0.2]
+score_results = []
+for risk in risk_levels:
+    for stop in stop_loss_levels:
+        result, _ = backtest_strategy(
+            signals=trading_signals,
+            price_data=final_df,
+            ticker='CL=F',
+            risk_per_trade=risk,
+            stop_loss_pct=stop
+        )
+        calculate_performance_metrics(result)
 
-plt.figure(figsize=(12, 6))
-plt.plot(backtest_results['timestamp'], backtest_results['equity'])
-plt.title('Strategy Equity Curve - Crude Oil')
-plt.ylabel('Equity ($)')
-plt.xlabel('Date')
-plt.grid(True)
+
+
+
+if not trade_log_df.empty:
+    buys  = trade_log_df[trade_log_df['action'].str.contains('BUY|Long', case=False, na=False)]
+    sells = trade_log_df[trade_log_df['action'].str.contains('SELL|Short', case=False, na=False)]
+else:
+    buys = sells = pd.DataFrame()
+    print("Warning: No trades were logged. Check backtest_strategy logic.")
+
+
+oil = final_df[final_df['Ticker'] == 'CL=F'].copy()
+oil = oil[(oil['timestamp'] >= result['timestamp'].min()) & 
+          (oil['timestamp'] <= result['timestamp'].max())]
+
+# Filter trades
+buys  = trade_log_df[trade_log_df['action'].str.contains('Buy|Long', case=False, na=False)]
+sells = trade_log_df[trade_log_df['action'].str.contains('Sell|Short', case=False, na=False)]
+
+buys   = trade_log_df[trade_log_df['action'].str.contains('Buy|Long', case=False, na=False)]
+sells  = trade_log_df[trade_log_df['action'].str.contains('Sell|Short', case=False, na=False)]
+stops  = trade_log_df[trade_log_df['action'].str.contains('Stop Loss', case=False, na=False)]
+
+plt.figure(figsize=(14, 8))
+
+# Primary axis: Equity Curve
+ax1 = plt.gca()
+ax1.plot(result['timestamp'], result['equity'], 
+         label='Strategy Equity', color='blue', linewidth=2.5)
+ax1.set_ylabel('Equity ($)', color='blue')
+ax1.tick_params(axis='y', labelcolor='blue')
+ax1.set_xlabel('Date')
+ax1.grid(True, alpha=0.3)
+
+# Secondary axis: Oil Price
+ax2 = ax1.twinx()
+ax2.plot(oil['timestamp'], oil['Close'], 
+         label='Crude Oil Close Price', color='red', linewidth=1.8, alpha=0.85)
+ax2.set_ylabel('Oil Price ($)', color='red')
+ax2.tick_params(axis='y', labelcolor='red')
+
+# === Trade Markers ===
+# Buy - Green circles
+if not buys.empty:
+    buy_eq = result[result['timestamp'].isin(buys['timestamp'])]['equity']
+    ax1.scatter(buys['timestamp'], buy_eq, 
+                color='green', s=130, label='BUY', zorder=5, marker='o', edgecolors='black')
+
+# Sell - Red circles
+if not sells.empty:
+    sell_eq = result[result['timestamp'].isin(sells['timestamp'])]['equity']
+    ax1.scatter(sells['timestamp'], sell_eq, 
+                color='red', s=130, label='SELL', zorder=5, marker='o', edgecolors='black')
+
+# Stop Loss - Orange triangles (pointing down)
+if not stops.empty:
+    stop_eq = result[result['timestamp'].isin(stops['timestamp'])]['equity']
+    ax1.scatter(stops['timestamp'], stop_eq, 
+                color='orange', s=160, label='STOP LOSS', zorder=6, 
+                marker='v', edgecolors='darkred', linewidth=1.5)
+
+plt.title('Strategy Equity Curve vs Crude Oil Price\nwith Buy / Sell / Stop Loss Markers')
+# Combined legend
+lines1, labels1 = ax1.get_legend_handles_labels()
+lines2, labels2 = ax2.get_legend_handles_labels()
+ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
+
+plt.tight_layout()
 plt.show()
-
-
-# Test
-# print(trading_signals[['predicted_return', 'signal', 'direction']].head(10))
