@@ -12,7 +12,6 @@ import requests
 os.makedirs('data', exist_ok=True)
 
 def generate_table(ticker_sym,start_date='2005-01-01',end_date='2026-05-01'):
-       # Will add more later: 'NG=F', 'GC=F'
 
     df = yf.download(ticker_sym, 
                     start=start_date, 
@@ -54,8 +53,6 @@ def generate_table(ticker_sym,start_date='2005-01-01',end_date='2026-05-01'):
     # Time features
     df['dayofweek'] = df['timestamp'].dt.dayofweek
     df['month'] = df['timestamp'].dt.month
-
-    # df.dropna(inplace=True)
     df.reset_index(drop=True, inplace=True)
     return df
 
@@ -86,9 +83,7 @@ def add_hdd_cdd_features(df: pd.DataFrame, temp_col: str, prefix: str, base_temp
 def get_ng_storage_data(start_date: str = '2025-01-01') -> pd.DataFrame:
     """
     Fetch weekly US Natural Gas Storage using EIA API (recommended)
-    """
-    API_KEY = "YOUR_API_KEY_HERE"   # ← Put your real key here
-    
+    """    
     url = "https://api.eia.gov/v2/natural-gas/stor/wkly/data/"
     
     params = {
@@ -134,8 +129,27 @@ def get_ng_storage_data(start_date: str = '2025-01-01') -> pd.DataFrame:
 
 
     return df
-   
 
+def get_trading_data(ticker_sym,start_date='2024-01-01',end_date='2026-05-01'):
+
+    df = yf.download(ticker_sym, 
+                    start=start_date, 
+                    end=end_date,
+                    progress=False,
+                    interval='1d')
+
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0] for col in df.columns]
+
+    df = df.reset_index()
+    df['Ticker']=ticker_sym
+
+    df.rename(columns={'Datetime': 'timestamp', 'Date': 'timestamp'}, inplace=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+    df.reset_index(drop=True, inplace=True)
+    return df
+   
 tickers = ['CL=F', 'NG=F', 'GC=F', 'ES=F', '^OVX', '^VIX']
 all_dfs = []
 for ticker in tickers:
@@ -178,11 +192,13 @@ for column in df_moscow.columns:
 df_new_york = add_hdd_cdd_features(df_new_york, temp_col='new_york_temp', prefix='new_york')
 df_moscow = add_hdd_cdd_features(df_moscow, temp_col='moscow_temp', prefix='moscow')
 
- 
 storage_df = get_ng_storage_data(start_date="2005-01-01")
 
 final_df = df.merge(df_new_york, on='timestamp', how='left').merge(df_moscow, on='timestamp', how='left').merge(storage_df, on='timestamp', how='left')
 
-
 filename = 'data/CL_futures_raw.csv'
 final_df.to_csv(filename, index=False)
+
+trading_data=get_trading_data(ticker_sym='CL=F', start_date='2024-01-01', end_date='2026-05-01')
+filename = 'data/trading_data.csv'
+trading_data.to_csv(filename, index=False)
