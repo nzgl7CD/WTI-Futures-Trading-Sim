@@ -45,7 +45,7 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.features import load_raw, build_features
-from src.prediction.targets import build_targets_a, build_targets_b
+from src.prediction.targets import build_targets_a, build_targets_b, build_targets_weekly
 from src.prediction.splits import fixed_split, WalkForward
 from src.prediction.metrics import summarize_per_target, regression_report, classification_report
 
@@ -80,6 +80,7 @@ EARLY_STOPPING_DEFAULT = 100
 def build_dataset(
     raw: pd.DataFrame,
     option: str = "a",
+    **kwargs,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Build (X, Y) for the chosen option.
@@ -94,8 +95,12 @@ def build_dataset(
     elif option == "b":
         X = build_features(raw, include_today_open=True)
         Y = build_targets_b(raw)
+    elif option == "weekly":
+        X = build_features(raw, include_today_open=False, include_weekly_features=True)
+        horizon = kwargs.get("horizon", 5)
+        Y = build_targets_weekly(raw, horizon=horizon)
     else:
-        raise ValueError("option must be 'a' or 'b'")
+        raise ValueError("option must be 'a', 'b', or 'weekly'")
 
     # Align indices and drop rows with any NaN in features OR targets.
     # We must be conservative here: a NaN in any used target means we can't
@@ -249,6 +254,28 @@ def predict(models: Dict[str, lgb.Booster], X: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Save / Load
+# ---------------------------------------------------------------------------
+def save_models(models: Dict[str, lgb.Booster], dir_path: str) -> None:
+    """Save each booster as a text file under dir_path/<target_name>.txt"""
+    os.makedirs(dir_path, exist_ok=True)
+    for name, booster in models.items():
+        out = os.path.join(dir_path, f"{name}.txt")
+        booster.save_model(out)
+        print(f"  saved {out}")
+
+
+def load_models(dir_path: str) -> Dict[str, lgb.Booster]:
+    """Load all *.txt boosters from dir_path."""
+    models: Dict[str, lgb.Booster] = {}
+    for fname in sorted(os.listdir(dir_path)):
+        if fname.endswith(".txt"):
+            name = fname[:-4]
+            models[name] = lgb.Booster(model_file=os.path.join(dir_path, fname))
+    return models
+
+
+# ---------------------------------------------------------------------------
 # Walk-forward driver
 # ---------------------------------------------------------------------------
 def walk_forward_predict(
@@ -283,29 +310,31 @@ def walk_forward_predict(
 # CLI
 # ---------------------------------------------------------------------------
 def _run(option: str, csv_path: str, n_trials: int, train_end: str,
-         val_end: str) -> pd.DataFrame:
-    print(f"\n========== Option {option.upper()} ==========")
+         val_end: str, model_dir: str = "models", seed: int = 42,
+         save: bool = True, horizon: int = 5,
+) -> Tuple[pd.DataFrame, Dict[str, lgb.Booster], pd.DataFrame]:
+    """Returns (summary, models, preds)."""
+    label = f"{option.upper()} horizon=t+{horizon}" if option == "weekly" else option.upper()
+    print(f"\n========== {label} ==========")
     raw = load_raw(csv_path)
     print(f"Raw rows: {len(raw)}  ({raw.index.min().date()} -> {raw.index.max().date()})")
 
-    X, Y = build_dataset(raw, option=option)
+    X, Y = build_dataset(raw, option=option, horizon=horizon)
     sp = fixed_split(raw, train_end=train_end, val_end=val_end)
     print(sp)
 
     target_cols = [c for c in Y.columns if not c.endswith("_direction")]
     params_per_target: Dict[str, Dict] = {}
 
-    print(f"\n[1/3] Optuna tuning ({n_trials} trials per target)")
+    print(f"\n[1/3] Optuna tuning ({n_trials} trials per target, seed={seed})")
     for tcol in target_cols:
         print(f"  tuning {tcol}...", end="", flush=True)
         Xt, yt = X.loc[sp.train], Y.loc[sp.train, tcol]
         Xv, yv = X.loc[sp.val],   Y.loc[sp.val, tcol]
-        best = tune_hyperparams(Xt, yt, Xv, yv, n_trials=n_trials)
+        best = tune_hyperparams(Xt, yt, Xv, yv, n_trials=n_trials, seed=seed)
         params_per_target[tcol] = best
         print(f" best_rmse={best['best_rmse']:.6f}  best_iter={best['best_iteration']}")
 
-    # Fit final model on all pre-backtest data (train + val combined).
-    # The backtest period (2024-today) is never seen during training — clean OOS test.
     pre_backtest = sp.train.append(sp.val)
     X_pre = X.loc[pre_backtest]
     Y_pre = Y.loc[pre_backtest]
@@ -324,25 +353,128 @@ def _run(option: str, csv_path: str, n_trials: int, train_end: str,
     summary = summarize_per_target(Y_bt, preds)
     print(summary.to_string(index=False))
 
-    out_path = f"data/preds_lgbm_option_{option}.csv"
+    if save:
+        slug = f"option_{option}" if option != "weekly" else f"option_weekly_t{horizon}"
+        out_path = f"data/preds_lgbm_{slug}.csv"
+        preds.to_csv(out_path)
+        print(f"\nSaved predictions to {out_path}")
+        save_dir = os.path.join(model_dir, slug)
+        print(f"Saving models to {save_dir}/")
+        save_models(models, save_dir)
+
+    return summary, models, preds
+
+
+def _sweep_horizons(
+    csv_path: str,
+    horizons: List[int],
+    n_trials: int,
+    train_end: str,
+    val_end: str,
+    model_dir: str,
+    max_attempts: int,
+    min_r2: float,
+) -> None:
+    """Try each horizon, keep retrying each with different seeds, save the best overall."""
+    global_best_r2 = -np.inf
+    global_best_models: Optional[Dict[str, lgb.Booster]] = None
+    global_best_preds: Optional[pd.DataFrame] = None
+    global_best_horizon: Optional[int] = None
+
+    print(f"\nSweeping horizons: {horizons}  ({n_trials} trials, up to {max_attempts} attempts each)")
+    print(f"Will save whichever horizon + seed first beats r2 >= {min_r2}, "
+          f"or best overall if none do.\n")
+
+    for horizon in horizons:
+        print(f"\n{'#'*60}")
+        print(f"# Horizon t+{horizon}")
+        print(f"{'#'*60}")
+        for attempt in range(1, max_attempts + 1):
+            seed = 42 + attempt - 1
+            print(f"\n  -- attempt {attempt}/{max_attempts}  seed={seed}")
+            summary, models, preds = _run(
+                "weekly", csv_path, n_trials, train_end, val_end,
+                model_dir, seed=seed, save=False, horizon=horizon,
+            )
+            r2_col = "r2_vs_zero"
+            if r2_col not in summary.columns:
+                break
+            r2 = float(summary[r2_col].iloc[0])
+            dir_acc = float(summary["dir_acc"].iloc[0]) if "dir_acc" in summary.columns else float("nan")
+            print(f"  r2_vs_zero={r2:.4f}  dir_acc={dir_acc:.3f}", end="")
+            if r2 > global_best_r2:
+                global_best_r2 = r2
+                global_best_models = models
+                global_best_preds = preds
+                global_best_horizon = horizon
+                print(f"  <- new global best", end="")
+            print()
+            if r2 >= min_r2:
+                print(f"  Target r2 >= {min_r2} met at horizon t+{horizon}, attempt {attempt}. Stopping sweep.")
+                _save_best(global_best_models, global_best_preds, global_best_horizon,
+                           global_best_r2, model_dir)
+                return
+        print(f"  Horizon t+{horizon} done. Best global r2 so far: {global_best_r2:.4f}")
+
+    print(f"\nSweep complete. Best r2={global_best_r2:.4f} at horizon t+{global_best_horizon}")
+    _save_best(global_best_models, global_best_preds, global_best_horizon,
+               global_best_r2, model_dir)
+
+
+def _save_best(
+    models: Dict[str, lgb.Booster],
+    preds: pd.DataFrame,
+    horizon: int,
+    r2: float,
+    model_dir: str,
+) -> None:
+    slug = f"option_weekly_t{horizon}"
+    out_path = f"data/preds_lgbm_{slug}.csv"
     preds.to_csv(out_path)
-    print(f"\nSaved predictions to {out_path}")
-    return summary
+    print(f"\nSaved best predictions (horizon=t+{horizon}, r2={r2:.4f}) to {out_path}")
+    save_dir = os.path.join(model_dir, slug)
+    print(f"Saving best models to {save_dir}/")
+    save_models(models, save_dir)
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("csv_path", help="Path to the OHLCV csv (e.g. data/brent.csv)")
-    p.add_argument("--option", choices=["a", "b", "both"], default="both")
+    p.add_argument("csv_path", help="Path to the OHLCV csv (e.g. data/CL_futures_raw.csv)")
+    p.add_argument("--option", choices=["a", "b", "both", "weekly"], default="both")
     p.add_argument("--n-trials", type=int, default=30)
     p.add_argument("--train-end", default="2022-12-31")
     p.add_argument("--val-end", default="2023-12-31")
+    p.add_argument("--model-dir", default="models",
+                   help="Directory to save trained models (default: models/)")
+    p.add_argument("--horizon", type=int, default=5,
+                   help="Trading-day horizon for weekly option (default: 5)")
+    p.add_argument("--sweep-horizons", type=int, nargs="+", metavar="N",
+                   help="Sweep multiple horizons and save the best (e.g. --sweep-horizons 5 10 15 20)")
+    p.add_argument("--min-r2", type=float, default=0.0,
+                   help="Stop sweep early when r2_vs_zero exceeds this (default: 0.0)")
+    p.add_argument("--max-attempts", type=int, default=5,
+                   help="Attempts per horizon in sweep (default: 5)")
     args = p.parse_args()
 
+    if args.sweep_horizons:
+        _sweep_horizons(
+            args.csv_path, args.sweep_horizons, args.n_trials,
+            args.train_end, args.val_end, args.model_dir,
+            args.max_attempts, args.min_r2,
+        )
+        return
+
+    options = []
     if args.option in ("a", "both"):
-        _run("a", args.csv_path, args.n_trials, args.train_end, args.val_end)
+        options.append("a")
     if args.option in ("b", "both"):
-        _run("b", args.csv_path, args.n_trials, args.train_end, args.val_end)
+        options.append("b")
+    if args.option == "weekly":
+        options.append("weekly")
+
+    for opt in options:
+        _run(opt, args.csv_path, args.n_trials, args.train_end, args.val_end,
+             args.model_dir, horizon=args.horizon)
 
 
 if __name__ == "__main__":

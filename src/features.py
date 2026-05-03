@@ -75,7 +75,11 @@ def load_raw(path: str) -> pd.DataFrame:
     return out
 
 
-def build_features(raw: pd.DataFrame, include_today_open: bool = False) -> pd.DataFrame:
+def build_features(
+    raw: pd.DataFrame,
+    include_today_open: bool = False,
+    include_weekly_features: bool = False,
+) -> pd.DataFrame:
     exclude = _TARGET_OHLCV  # raw OHLCV goes to targets, not features
     cols = [c for c in raw.columns if c not in exclude]
     X = raw[cols].copy()
@@ -83,5 +87,21 @@ def build_features(raw: pd.DataFrame, include_today_open: bool = False) -> pd.Da
     if include_today_open:
         # Known at open of day t; legitimate for Option B
         X["CLF_overnight_gap"] = np.log(raw["Open"] / raw["Close"].shift(1))
+
+    if include_weekly_features:
+        c = raw["Close"]
+        log_ret = np.log(c / c.shift(1))
+        # Longer lags — capture where price was 2/4 weeks ago
+        for lag in [10, 15, 20]:
+            X[f"CLF_return_lag_{lag}"] = log_ret.shift(lag)
+        # Cumulative momentum — how much the market has trended recently
+        for window in [10, 20]:
+            X[f"CLF_momentum_{window}"] = np.log(c / c.shift(window))
+        # Realized vol over different windows — regime feature
+        for window in [5, 10, 20]:
+            X[f"CLF_realvol_{window}"] = log_ret.rolling(window).std()
+        # Distance from SMA-50 — mean reversion signal
+        sma50 = c.rolling(50).mean()
+        X["CLF_dist_sma50"] = (c - sma50) / sma50
 
     return X

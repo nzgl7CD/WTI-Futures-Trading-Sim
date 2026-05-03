@@ -85,6 +85,23 @@ def build_targets_b(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def build_targets_weekly(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
+    """
+    Predict open[t+horizon] using info up to end of day t.
+
+    horizon is in *trading* days — shift(-horizon) skips weekends/holidays
+    automatically because the index only contains trading days.
+
+    ref_price = close[t]
+    target = log(open[t+horizon] / close[t])
+    """
+    c = df["Close"]
+    o = df["Open"]
+    out = pd.DataFrame(index=df.index)
+    out[f"target_open_t{horizon}"] = np.log(o.shift(-horizon) / c)
+    return out
+
+
 def reconstruct_prices_a(close_t: pd.Series, preds: pd.DataFrame) -> pd.DataFrame:
     """Convert Option A log-return predictions back to dollar price levels."""
     out = pd.DataFrame(index=preds.index)
