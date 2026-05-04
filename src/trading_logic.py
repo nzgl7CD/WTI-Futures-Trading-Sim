@@ -1,10 +1,7 @@
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import data_fetch
-from datetime import datetime, timedelta
-from dataclasses import dataclass
-from typing import List
+
 
 
 
@@ -85,13 +82,13 @@ def backtest_strategy(
     df = df.dropna(subset=[execution_price]).reset_index(drop=True)
 
     capital = float(initial_capital)
-    position = 0
-    entry_prices = []
-    entry_day = None
+    position = 0                     # net contracts
+    entry_prices = []                # list of entry prices for average calculation
     equity_curve = []
     trade_log = []
     total_commissions = 0.0
     count_stop_loss = 0
+    entry_day=None
 
     for i in range(len(df)):
         row = df.iloc[i]
@@ -139,6 +136,11 @@ def backtest_strategy(
             stop_distance = exec_price * stop_loss_pct
             contracts = int(risk_amount / (stop_distance * multiplier))
             contracts = max(1, min(contracts, 30))
+
+            # Capital check - ensure we can afford these contracts
+            contract_value = exec_price * multiplier
+            max_affordable = int((capital * 0.95) / contract_value)
+            contracts = min(contracts, max_affordable)
 
             position = contracts if signal == 1 else -contracts
             entry_prices = [exec_price] * abs(contracts)
@@ -234,8 +236,8 @@ trading_signals = generate_trading_signals(
     weak_threshold_long=0.6,
     strong_threshold_short=0.35,
     weak_threshold_short=0.4,
-    strong_position_size=0.1,
-    weak_position_size=0.01,
+    strong_position_size=0.25,
+    weak_position_size=0.05,
     allow_short=True
 )
 
