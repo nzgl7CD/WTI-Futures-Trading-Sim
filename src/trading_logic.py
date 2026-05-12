@@ -88,6 +88,10 @@ def backtest_strategy(
     trade_log = []
     total_commissions = 0.0
     count_stop_loss = 0
+    count_large_longs = 0
+    count_large_shorts = 0
+    count_small_longs = 0
+    count_small_shorts = 0
     entry_day=None
 
     for i in range(len(df)):
@@ -131,8 +135,12 @@ def backtest_strategy(
                 entry_day = None
 
         # === Open new position ===
-        if signal != 0:
+        if signal != 0 and capital > 0:
             risk_amount = capital * position_size
+            count_large_longs += 1 if signal == 1 and position_size >= 0.1 else 0
+            count_large_shorts += 1 if signal == -1 and position_size >= 0.1 else 0 
+            count_small_longs += 1 if signal == 1 and position_size < 0.1 else 0
+            count_small_shorts += 1 if signal == -1 and position_size < 0.1 else 0
             stop_distance = exec_price * stop_loss_pct
             contracts = int(risk_amount / (stop_distance * multiplier))
             contracts = max(1, min(contracts, 30))
@@ -160,6 +168,7 @@ def backtest_strategy(
             'timestamp': row['timestamp'],
             'equity': current_equity,
             'position': position,
+            'position_size': position_size, 
             'signal': signal,
             'close': exec_price,
             'avg_entry': avg_entry
@@ -179,6 +188,10 @@ def backtest_strategy(
     print(f"Total Return        : {result['cum_return'].iloc[-1]:.2%}")
     print(f"Max Drawdown        : {result['drawdown_pct'].min():.2%}")
     print(f"Stop Loss Triggers  : {count_stop_loss}")
+    print(f"Count Large Longs   : {count_large_longs}")
+    print(f"Count Large Shorts  : {count_large_shorts}")
+    print(f"Count Small Longs   : {count_small_longs}")
+    print(f"Count Small Shorts  : {count_small_shorts}")
     print(f"Total Commissions   : ${total_commissions:,.2f}")
     print("="*70)
 
@@ -206,7 +219,6 @@ def calculate_performance_metrics(result: pd.DataFrame, initial_capital: float =
         'Return / Drawdown Ratio': return_to_dd,
         'Sharpe Ratio': sharpe,
         'Final Equity': final_equity,
-        'Number of Trades': len(result),
         'Score': (total_return / abs(max_dd)) * sharpe * 0.7
     }
 
@@ -220,7 +232,6 @@ def calculate_performance_metrics(result: pd.DataFrame, initial_capital: float =
         print(f"Return / DD Ratio     : {metrics['Return / Drawdown Ratio']:.2f}")
         print(f"Sharpe Ratio          : {metrics['Sharpe Ratio']:.2f}")
         print(f"Final Equity          : ${metrics['Final Equity']:,.2f}")
-        print(f"Number of Trades      : {metrics['Number of Trades']}")
         print(f"Score                 : {metrics['Score']:.2f}")
         print("="*60)
         
@@ -236,8 +247,8 @@ trading_signals = generate_trading_signals(
     weak_threshold_long=0.6,
     strong_threshold_short=0.35,
     weak_threshold_short=0.4,
-    strong_position_size=0.25,
-    weak_position_size=0.05,
+    strong_position_size=0.1,
+    weak_position_size=0.01,
     allow_short=True
 )
 
@@ -248,7 +259,7 @@ result, trade_log_df = backtest_strategy(
     initial_capital=100_000,
     prediction_horizon=10,
     min_holding_days=5,         
-    stop_loss_pct=0.15,
+    stop_loss_pct=0.1,
     execution_price='Close'       
 )
 
