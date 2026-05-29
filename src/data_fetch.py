@@ -8,23 +8,26 @@ import matplotlib.pyplot as plt
 import meteostat as ms
 import eia
 import requests
-
 os.makedirs('data', exist_ok=True)
 
-def generate_table(ticker_sym,start_date='2005-01-01',end_date='2026-05-01'):
 
+api_key = "py7iN2Q56STMQTeed4o9sxFavIP9VBSuzzZub6YQ"
+api = eia.API(api_key)
+
+def generate_table(ticker_sym, start_date='2000-01-01', end_date='2026-05-29'):
+    """Generate features with ticker-specific column names."""
+    
     df = yf.download(ticker_sym, 
-                    start=start_date, 
-                    end=end_date,
-                    progress=False,
-                    interval='1d')
+                     start=start_date, 
+                     end=end_date,
+                     progress=False,
+                     interval='1d')
 
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [col[0] for col in df.columns]
 
     df = df.reset_index()
-    df['Ticker']=ticker_sym
-
+    df['Ticker'] = ticker_sym
     df.rename(columns={'Datetime': 'timestamp', 'Date': 'timestamp'}, inplace=True)
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
@@ -85,7 +88,7 @@ def get_ng_storage_data(start_date: str = '2025-01-01') -> pd.DataFrame:
     Fetch weekly US Natural Gas Storage using EIA API (recommended)
     """    
     url = "https://api.eia.gov/v2/natural-gas/stor/wkly/data/"
-    
+
     params = {
         "api_key": "py7iN2Q56STMQTeed4o9sxFavIP9VBSuzzZub6YQ",
         "frequency": "weekly",
@@ -100,18 +103,21 @@ def get_ng_storage_data(start_date: str = '2025-01-01') -> pd.DataFrame:
 
     response = requests.get(url, params=params)
     
+
     if response.status_code != 200:
         print(f"API Error {response.status_code}: {response.text[:400]}")
         return pd.DataFrame()
 
+    
     data = response.json()
-
+    
     # Handle the actual structure returned by EIA
     if 'response' in data and 'data' in data['response']:
-        df = pd.DataFrame(data['response']['data'])
+        df= pd.DataFrame(data['response']['data'])
     else:
         print("Unexpected API format. Raw keys:", list(data.keys()))
         return pd.DataFrame()
+    
 
     # Clean column names
     df = df.rename(columns={
@@ -120,7 +126,8 @@ def get_ng_storage_data(start_date: str = '2025-01-01') -> pd.DataFrame:
     })
 
     df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df = df.sort_values('timestamp').reset_index(drop=True)
+
+
     df['ng_storage_bcf'] = df['ng_storage_bcf'].astype(int)
     # # Add useful features
     df['ng_storage_change_wow'] = df['ng_storage_bcf'].pct_change()
@@ -129,6 +136,7 @@ def get_ng_storage_data(start_date: str = '2025-01-01') -> pd.DataFrame:
 
 
     return df
+
 
 def get_trading_data(ticker_sym,start_date='2024-01-01',end_date='2026-05-01'):
 
@@ -150,55 +158,120 @@ def get_trading_data(ticker_sym,start_date='2024-01-01',end_date='2026-05-01'):
     df.reset_index(drop=True, inplace=True)
     return df
    
-tickers = ['CL=F', 'NG=F', 'GC=F', 'ES=F', '^OVX', '^VIX']
+tickers = ['CL=F', 'NG=F', 'GC=F', 'ES=F', '^OVX', '^VIX', 'DX-Y.NYB']
 all_dfs = []
 for ticker in tickers:
     all_dfs.append(generate_table(ticker_sym=ticker))
 df=pd.concat(all_dfs, ignore_index=True)
 
-START = date(2005, 1, 1)
-END = date(2026, 5, 1)
+START = date(2000, 1, 1)
+END = date(2026, 5, 29)
 
-POINT_NEW_YORK = ms.Point(40.7128, -74.0060,10) #United States - New York
+# ==================== CITY COORDINATES ====================
 
-POINT_MOSCOW = ms.Point(55.7558, 37.6173, 150) #Russia - Moscow
+POINT_NEW_YORK = ms.Point(40.7128, -74.0060, 10)   # United States - New York
+POINT_MOSCOW   = ms.Point(55.7558, 37.6173, 150)  # Russia - Moscow
+POINT_BEIJING  = ms.Point(39.9042, 116.4074, 10)  # China - Beijing
+POINT_SHANGHAI = ms.Point(31.2304, 121.4737, 10)  # China - Shanghai
+POINT_TEHRAN   = ms.Point(35.6892, 51.3890, 10)   # Iran - Tehran
+POINT_CALGARY  = ms.Point(51.0447, -114.0719, 10) # Canada - Calgary
+POINT_TORONTO  = ms.Point(43.6532, -79.3832, 10)  # Canada - Toronto
+
+# ==================== FETCH STATIONS ====================
 
 stations_new_york = ms.stations.nearby(POINT_NEW_YORK, limit=4)
-stations_moscow = ms.stations.nearby(POINT_MOSCOW, limit=4)
+stations_moscow   = ms.stations.nearby(POINT_MOSCOW, limit=4)
+stations_beijing  = ms.stations.nearby(POINT_BEIJING, limit=4)
+stations_shanghai = ms.stations.nearby(POINT_SHANGHAI, limit=4)
+stations_tehran   = ms.stations.nearby(POINT_TEHRAN, limit=4)
+stations_calgary  = ms.stations.nearby(POINT_CALGARY, limit=4)
+stations_toronto  = ms.stations.nearby(POINT_TORONTO, limit=4)
+
+# ==================== FETCH DAILY DATA ====================
 
 ts_new_york = ms.daily(stations_new_york, START, END)
+ts_moscow   = ms.daily(stations_moscow, START, END)
+ts_beijing  = ms.daily(stations_beijing, START, END)
+ts_shanghai = ms.daily(stations_shanghai, START, END)
+ts_tehran   = ms.daily(stations_tehran, START, END)
+ts_calgary  = ms.daily(stations_calgary, START, END)
+ts_toronto  = ms.daily(stations_toronto, START, END)
+
+# ==================== INTERPOLATE & CREATE DATAFRAMES ====================
+
 df_new_york = ms.interpolate(ts_new_york, POINT_NEW_YORK).fetch().reset_index()
+df_moscow   = ms.interpolate(ts_moscow, POINT_MOSCOW).fetch().reset_index()
+df_beijing  = ms.interpolate(ts_beijing, POINT_BEIJING).fetch().reset_index()
+df_shanghai = ms.interpolate(ts_shanghai, POINT_SHANGHAI).fetch().reset_index()
+df_tehran   = ms.interpolate(ts_tehran, POINT_TEHRAN).fetch().reset_index()
+df_calgary  = ms.interpolate(ts_calgary, POINT_CALGARY).fetch().reset_index()
+df_toronto  = ms.interpolate(ts_toronto, POINT_TORONTO).fetch().reset_index()
 
-ts_moscow = ms.daily(stations_moscow, START, END)
-df_moscow = ms.interpolate(ts_moscow, POINT_MOSCOW).fetch().reset_index()
+# ==================== RENAME COLUMNS ====================
 
-for column in df_new_york.columns:
-    if column == 'time':
-        df_new_york.rename(columns={'time': 'timestamp'}, inplace=True)
-    else:
-        df_new_york.rename(columns={column: f"new_york_{column}"}, inplace=True)
+for df, prefix in [
+    (df_new_york, "new_york"),
+    (df_moscow, "moscow"),
+    (df_beijing, "beijing"),
+    (df_shanghai, "shanghai"),
+    (df_tehran, "tehran"),
+    (df_calgary, "calgary"),
+    (df_toronto, "toronto")
+]:
+    for column in df.columns:
+        if column == 'time':
+            df.rename(columns={'time': 'timestamp'}, inplace=True)
+        else:
+            df.rename(columns={column: f"{prefix}_{column}"}, inplace=True)
 
-for column in df_moscow.columns:
-    if column == 'time':
-        df_moscow.rename(columns={'time': 'timestamp'}, inplace=True)
-    else:
-        df_moscow.rename(columns={column: f"moscow_{column}"}, inplace=True)
-for column in df_moscow.columns:
-    if df_moscow[column].isnull().any():
-        print(f"Column '{column}' in Moscow data has missing values.")
-    else:
-        print(f"Column '{column}' in Moscow data has no missing values.")
+# ==================== MISSING VALUES CHECK ====================
 
-df_new_york = add_hdd_cdd_features(df_new_york, temp_col='new_york_temp', prefix='new_york')
-df_moscow = add_hdd_cdd_features(df_moscow, temp_col='moscow_temp', prefix='moscow')
+for name, df in [
+    ("New York", df_new_york),
+    ("Moscow", df_moscow),
+    ("Beijing", df_beijing),
+    ("Shanghai", df_shanghai),
+    ("Tehran", df_tehran),
+    ("Calgary", df_calgary),
+    ("Toronto", df_toronto)
+]:
+    for column in df.columns:
+        if df[column].isnull().any():
+            print(f"Column '{column}' in {name} data has missing values.")
+        else:
+            print(f"Column '{column}' in {name} data has no missing values.")
 
-storage_df = get_ng_storage_data(start_date="2005-01-01")
+# ==================== ADD HDD / CDD FEATURES ====================
 
-final_df = df.merge(df_new_york, on='timestamp', how='left').merge(df_moscow, on='timestamp', how='left').merge(storage_df, on='timestamp', how='left')
+for df, temp_col, prefix in [
+    (df_new_york, 'new_york_temp', 'new_york'),
+    (df_moscow, 'moscow_temp', 'moscow'),
+    (df_beijing, 'beijing_temp', 'beijing'),
+    (df_shanghai, 'shanghai_temp', 'shanghai'),
+    (df_tehran, 'tehran_temp', 'tehran'),
+    (df_calgary, 'calgary_temp', 'calgary'),
+    (df_toronto, 'toronto_temp', 'toronto')
+]:
+    df = add_hdd_cdd_features(df, temp_col=temp_col, prefix=prefix)
+
+
+gas_storage_df = get_ng_storage_data(start_date="2000-01-01")
+
+final_df = (df
+            .merge(df_new_york,  on='timestamp', how='left')
+            .merge(df_moscow,    on='timestamp', how='left')
+            .merge(df_beijing,   on='timestamp', how='left')
+            .merge(df_shanghai,  on='timestamp', how='left')
+            .merge(df_tehran,    on='timestamp', how='left')
+            .merge(df_calgary,   on='timestamp', how='left')
+            .merge(df_toronto,   on='timestamp', how='left')
+            .merge(gas_storage_df, on='timestamp', how='left')
+            
+)
 
 filename = 'data/CL_futures_raw.csv'
 final_df.to_csv(filename, index=False)
 
-trading_data=get_trading_data(ticker_sym='CL=F', start_date='2024-01-01', end_date='2026-05-01')
-filename = 'data/trading_data.csv'
-trading_data.to_csv(filename, index=False)
+# trading_data=get_trading_data(ticker_sym='CL=F', start_date='2024-01-01', end_date='2026-05-01')
+# filename = 'data/trading_data.csv'
+# trading_data.to_csv(filename, index=False)

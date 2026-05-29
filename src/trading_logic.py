@@ -61,7 +61,7 @@ def backtest_strategy(
     prediction_horizon: int = 10,     
     min_holding_days: int = 5          
 ):
-    print(f"Backtesting {ticker} | Horizon: {prediction_horizon} days | Min hold: {min_holding_days} days")
+    print(f"Backtesting {ticker} | Horizon: {prediction_horizon}d | Min hold: {min_holding_days}d")
 
     # Prepare prices
     prices = price_data[price_data['Ticker'] == ticker].copy()
@@ -82,25 +82,19 @@ def backtest_strategy(
     df = df.dropna(subset=[execution_price]).reset_index(drop=True)
 
     capital = float(initial_capital)
-    position = 0                     # net contracts
-    entry_prices = []                # list of entry prices for average calculation
+    position = 0                     # net contracts (positive = long)
+    entry_prices = []                # list to calculate average entry
     equity_curve = []
     trade_log = []
     total_commissions = 0.0
     count_stop_loss = 0
-    count_large_longs = 0
-    count_large_shorts = 0
-    count_small_longs = 0
-    count_small_shorts = 0
-    entry_day=None
 
     for i in range(len(df)):
         row = df.iloc[i]
         exec_price = float(row[execution_price])
         mtm_price = float(row['Close'])
         signal = int(row.get('signal', 0))
-        position_size = float(row.get('position_size', 0))
-        days_held = (i - entry_day) if entry_day is not None else 999
+        desired_position_size = float(row.get('position_size', 0.0))   # 0.0 to 1.0
 
         realized_pnl = 0.0
         commission = 0.0
@@ -110,90 +104,100 @@ def backtest_strategy(
             avg_entry = sum(entry_prices) / len(entry_prices)
             stop_price = avg_entry * (1 - stop_loss_pct) if position > 0 else avg_entry * (1 + stop_loss_pct)
             
-            hit_stop = (position > 0 and exec_price <= stop_price) or (position < 0 and exec_price >= stop_price)
+            hit_stop = (position > 0 and mtm_price <= stop_price) or (position < 0 and mtm_price >= stop_price)
             
             if hit_stop:
                 count_stop_loss += 1
-                realized_pnl = (exec_price - avg_entry) * position * multiplier
+                realized_pnl = (mtm_price - avg_entry) * position * multiplier
                 commission = commission_per_contract * abs(position)
                 capital += realized_pnl - commission
-                trade_log.append({'timestamp': row['timestamp'], 'action': 'Stop Loss', 'price': exec_price, 'pnl': realized_pnl})
+                trade_log.append({'timestamp': row['timestamp'], 'action': 'Stop Loss', 'price': mtm_price, 'pnl': realized_pnl})
                 position = 0
                 entry_prices = []
-                entry_day = None
 
-        # === Close on signal change or after minimum holding period + new opposite signal ===
-        if position != 0 and days_held >= min_holding_days:
-            if signal == 0 or signal != np.sign(position):
+        # === Close on opposite / flat signal after min holding ===
+        if position != 0:
+            days_held = (row['timestamp'] - trade_log[-1]['timestamp']).days if trade_log else 999
+            if days_held >= min_holding_days and (signal == 0 or signal != np.sign(position)):
                 avg_entry = sum(entry_prices) / len(entry_prices)
-                realized_pnl = (exec_price - avg_entry) * position * multiplier
+                realized_pnl = (mtm_price - avg_entry) * position * multiplier
                 commission = commission_per_contract * abs(position)
                 capital += realized_pnl - commission
-                trade_log.append({'timestamp': row['timestamp'], 'action': 'Exit', 'price': exec_price, 'pnl': realized_pnl})
+                trade_log.append({'timestamp': row['timestamp'], 'action': 'Exit', 'price': mtm_price, 'pnl': realized_pnl})
                 position = 0
                 entry_prices = []
-                entry_day = None
 
-        # === Open new position ===
-        if signal != 0 and capital > 0:
-            risk_amount = capital * position_size
-            count_large_longs += 1 if signal == 1 and position_size >= 0.1 else 0
-            count_large_shorts += 1 if signal == -1 and position_size >= 0.1 else 0 
-            count_small_longs += 1 if signal == 1 and position_size < 0.1 else 0
-            count_small_shorts += 1 if signal == -1 and position_size < 0.1 else 0
-            stop_distance = exec_price * stop_loss_pct
-            contracts = int(risk_amount / (stop_distance * multiplier))
-            contracts = max(1, min(contracts, 30))
+        # === Adjust toward target position ===
+        if desired_position_size > 0:
+            risk_amount = capital * desired_position_size
+            stop_distance = exec_price * stop_loss_pct or (exec_price * 0.05)
+            target_contracts = int(risk_amount / (stop_distance * multiplier))
+            target_contracts = max(1, min(target_contracts, 30))
 
-            # Capital check - ensure we can afford these contracts
+            # Capital check
             contract_value = exec_price * multiplier
             max_affordable = int((capital * 0.95) / contract_value)
-            contracts = min(contracts, max_affordable)
+            target_contracts = min(target_contracts, max_affordable)
 
-            position = contracts if signal == 1 else -contracts
-            entry_prices = [exec_price] * abs(contracts)
-            commission = commission_per_contract * abs(position)
-            capital -= commission
-            entry_day = i
+            target_position = target_contracts if signal == 1 else -target_contracts
 
-            action = 'Buy Long' if signal == 1 else 'Sell Short'
-            trade_log.append({'timestamp': row['timestamp'], 'action': action, 'price': exec_price, 'size': abs(position)})
+            # How many contracts to trade
+            contracts_to_trade = target_position - position
+
+            if contracts_to_trade != 0:
+                trade_size = abs(contracts_to_trade)
+                commission = commission_per_contract * trade_size
+
+                if contracts_to_trade > 0:
+                    action = 'Buy Long' if position <= 0 else 'Add Long'
+                    capital -= commission
+                else:
+                    action = 'Sell Short' if position >= 0 else 'Reduce Short'
+                    capital += commission   # we receive money from selling
+
+                position = target_position
+                entry_prices.extend([exec_price] * trade_size)
+
+                trade_log.append({
+                    'timestamp': row['timestamp'],
+                    'action': action,
+                    'price': exec_price,
+                    'size': trade_size,
+                    'position_size': desired_position_size
+                })
 
         # Mark-to-market
-        avg_entry = sum(entry_prices) / len(entry_prices) if entry_prices else 0
-        unrealized = (exec_price - avg_entry) * position * multiplier if position != 0 else 0.0
+        avg_entry = sum(entry_prices) / len(entry_prices) if entry_prices else 0.0
+        unrealized = (mtm_price - avg_entry) * position * multiplier if position != 0 else 0.0
         current_equity = capital + unrealized
 
         equity_curve.append({
             'timestamp': row['timestamp'],
             'equity': current_equity,
             'position': position,
-            'position_size': position_size, 
             'signal': signal,
-            'close': exec_price,
+            'close': mtm_price,
             'avg_entry': avg_entry
         })
 
         total_commissions += commission
 
     result = pd.DataFrame(equity_curve)
+    result = result.dropna(subset=['equity']).reset_index(drop=True)
+
     result['cum_return'] = result['equity'] / initial_capital - 1
     result['peak'] = result['equity'].cummax()
     result['drawdown_pct'] = (result['equity'] - result['peak']) / result['peak']
 
-    print("\n" + "="*70)
-    print("BACKTEST SUMMARY (10-day horizon)")
+    print("\n" + "="*80)
+    print("BACKTEST SUMMARY")
     print(f"Initial Capital     : ${initial_capital:,.0f}")
     print(f"Final Equity        : ${result['equity'].iloc[-1]:,.2f}")
     print(f"Total Return        : {result['cum_return'].iloc[-1]:.2%}")
     print(f"Max Drawdown        : {result['drawdown_pct'].min():.2%}")
     print(f"Stop Loss Triggers  : {count_stop_loss}")
-    print(f"Count Large Longs   : {count_large_longs}")
-    print(f"Count Large Shorts  : {count_large_shorts}")
-    print(f"Count Small Longs   : {count_small_longs}")
-    print(f"Count Small Shorts  : {count_small_shorts}")
     print(f"Total Commissions   : ${total_commissions:,.2f}")
-    print("="*70)
+    print("="*80)
 
     return result, pd.DataFrame(trade_log)
 
@@ -238,8 +242,8 @@ def calculate_performance_metrics(result: pd.DataFrame, initial_capital: float =
     return metrics
 
 
-preds=pd.DataFrame(pd.read_csv('data/preds_lgbm_option_direction_t10.csv', parse_dates=['timestamp']))
-final_df=pd.DataFrame(pd.read_csv("data/trading_data.csv", parse_dates=['timestamp']))
+preds=pd.DataFrame(pd.read_csv('data\preds_lgbm_option_direction_t10.csv', parse_dates=['timestamp']))
+final_df=pd.DataFrame(pd.read_csv("data\CL_futures_raw.csv", parse_dates=['timestamp']))
 
 trading_signals = generate_trading_signals(
     predictions=preds,
@@ -247,7 +251,7 @@ trading_signals = generate_trading_signals(
     weak_threshold_long=0.6,
     strong_threshold_short=0.35,
     weak_threshold_short=0.4,
-    strong_position_size=0.1,
+    strong_position_size=0.15,
     weak_position_size=0.01,
     allow_short=True
 )
@@ -258,13 +262,13 @@ result, trade_log_df = backtest_strategy(
     ticker='CL=F',
     initial_capital=100_000,
     prediction_horizon=10,
-    min_holding_days=5,         
-    stop_loss_pct=0.1,
+    min_holding_days=8,         
+    stop_loss_pct=0.15,
     execution_price='Close'       
 )
 
 calculate_performance_metrics(result)
-
+calculate_performance_metrics(result)
 
 if not trade_log_df.empty:
     buys  = trade_log_df[trade_log_df['action'].str.contains('BUY|Long', case=False, na=False)]
@@ -306,7 +310,6 @@ ax2.tick_params(axis='y', labelcolor='red')
 
 # === Trade Markers ===
 
-# Buy - Green circles
 if not buys.empty:
     buy_eq = result[result['timestamp'].isin(buys['timestamp'])]['equity']
     ax1.scatter(buys['timestamp'], buy_eq, 
