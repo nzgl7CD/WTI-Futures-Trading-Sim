@@ -209,7 +209,7 @@ df_toronto  = ms.interpolate(ts_toronto, POINT_TORONTO).fetch().reset_index()
 
 # ==================== RENAME COLUMNS ====================
 
-for df, prefix in [
+for weather_df, prefix in [
     (df_new_york, "new_york"),
     (df_moscow, "moscow"),
     (df_beijing, "beijing"),
@@ -218,15 +218,15 @@ for df, prefix in [
     (df_calgary, "calgary"),
     (df_toronto, "toronto")
 ]:
-    for column in df.columns:
+    for column in weather_df.columns:
         if column == 'time':
-            df.rename(columns={'time': 'timestamp'}, inplace=True)
+            weather_df.rename(columns={'time': 'timestamp'}, inplace=True)
         else:
-            df.rename(columns={column: f"{prefix}_{column}"}, inplace=True)
+            weather_df.rename(columns={column: f"{prefix}_{column}"}, inplace=True)
 
 # ==================== MISSING VALUES CHECK ====================
 
-for name, df in [
+for name, weather_df in [
     ("New York", df_new_york),
     ("Moscow", df_moscow),
     ("Beijing", df_beijing),
@@ -235,15 +235,15 @@ for name, df in [
     ("Calgary", df_calgary),
     ("Toronto", df_toronto)
 ]:
-    for column in df.columns:
-        if df[column].isnull().any():
+    for column in weather_df.columns:
+        if weather_df[column].isnull().any():
             print(f"Column '{column}' in {name} data has missing values.")
         else:
             print(f"Column '{column}' in {name} data has no missing values.")
 
 # ==================== ADD HDD / CDD FEATURES ====================
 
-for df, temp_col, prefix in [
+for weather_df, temp_col, prefix in [
     (df_new_york, 'new_york_temp', 'new_york'),
     (df_moscow, 'moscow_temp', 'moscow'),
     (df_beijing, 'beijing_temp', 'beijing'),
@@ -252,7 +252,7 @@ for df, temp_col, prefix in [
     (df_calgary, 'calgary_temp', 'calgary'),
     (df_toronto, 'toronto_temp', 'toronto')
 ]:
-    df = add_hdd_cdd_features(df, temp_col=temp_col, prefix=prefix)
+    weather_df = add_hdd_cdd_features(weather_df, temp_col=temp_col, prefix=prefix)
 
 
 gas_storage_df = get_ng_storage_data(start_date="2000-01-01")

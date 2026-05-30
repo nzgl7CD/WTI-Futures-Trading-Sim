@@ -85,7 +85,7 @@ def build_targets_b(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_targets_weekly(df: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
+def build_targets_weekly(df: pd.DataFrame, horizon: int = 10) -> pd.DataFrame:
     """
     Predict open[t+horizon] using info up to end of day t.
 

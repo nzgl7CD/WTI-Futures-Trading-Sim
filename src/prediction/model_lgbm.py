@@ -79,7 +79,8 @@ EARLY_STOPPING_DEFAULT = 100
 # ---------------------------------------------------------------------------
 def build_dataset(
     raw: pd.DataFrame,
-    option: str = "a",
+    option: str = "weekly",
+    horizon: int = 10,
     **kwargs,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
@@ -97,7 +98,6 @@ def build_dataset(
         Y = build_targets_b(raw)
     elif option == "weekly":
         X = build_features(raw, include_today_open=False, include_weekly_features=True)
-        horizon = kwargs.get("horizon", 5)
         Y = build_targets_weekly(raw, horizon=horizon)
     else:
         raise ValueError("option must be 'a', 'b', or 'weekly'")
