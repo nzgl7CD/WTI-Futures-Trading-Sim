@@ -442,8 +442,8 @@ def main():
     p.add_argument("csv_path", help="Path to the OHLCV csv (e.g. data/CL_futures_raw.csv)")
     p.add_argument("--option", choices=["a", "b", "both", "weekly"], default="both")
     p.add_argument("--n-trials", type=int, default=30)
-    p.add_argument("--train-end", default="2022-12-31")
-    p.add_argument("--val-end", default="2023-12-31")
+    p.add_argument("--train-end", default="2025-01-01")
+    p.add_argument("--val-end", default="2026-01-01")
     p.add_argument("--model-dir", default="models",
                    help="Directory to save trained models (default: models/)")
     p.add_argument("--horizon", type=int, default=5,

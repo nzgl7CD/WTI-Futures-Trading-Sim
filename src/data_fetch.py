@@ -20,17 +20,13 @@ def generate_table(start_date='2000-01-01', end_date='2026-05-29'):
     tickers = ['CL=F', 'NG=F', 'GC=F', 'ES=F', '^OVX', '^VIX', 'DX-Y.NYB']
     all_dfs = []
     for ticker in tickers:
-            
-
         df = yf.download(ticker, 
                         start=start_date, 
                         end=end_date,
                         progress=False,
                         interval='1d')
-
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = [col[0] for col in df.columns]
-
         df = df.reset_index()
         df['Ticker'] = ticker
         df.rename(columns={'Datetime': 'timestamp', 'Date': 'timestamp'}, inplace=True)
@@ -165,7 +161,7 @@ def weather_data_pipeline(start_date: date=date(2020, 5, 1), end_date: date=date
                 print(f"Column '{column}' in {name} data has no missing values.")
 
     # ==================== ADD HDD / CDD FEATURES ====================
-
+    
     for weather_df, temp_col, prefix in [
         (df_new_york, 'new_york_temp', 'new_york'),
         (df_moscow, 'moscow_temp', 'moscow'),
@@ -176,15 +172,12 @@ def weather_data_pipeline(start_date: date=date(2020, 5, 1), end_date: date=date
     ]:
         weather_df = add_hdd_cdd_features(weather_df, temp_col=temp_col, prefix=prefix)
 
-
-
     return (df_new_york
                 .merge(df_moscow,    on='timestamp', how='left')
                 .merge(df_beijing,   on='timestamp', how='left')
                 .merge(df_shanghai,  on='timestamp', how='left')
                 .merge(df_calgary,   on='timestamp', how='left')
                 .merge(df_toronto,   on='timestamp', how='left')
-                
     )
 
 
