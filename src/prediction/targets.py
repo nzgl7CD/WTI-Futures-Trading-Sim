@@ -36,13 +36,13 @@ features, drop rows where any used target is NaN.
 from __future__ import annotations
 import numpy as np
 import pandas as pd
+from fractdiff import frac_diff_ffd, find_min_d
 
 
 def build_targets_a(df: pd.DataFrame) -> pd.DataFrame:
     """Targets for Option A: predict day t+1 using info up to end of day t."""
     o, h, l, c = df["Open"], df["High"], df["Low"], df["Close"]
     ref = c  # close[t]
-
     nxt_o = o.shift(-1)
     nxt_h = h.shift(-1)
     nxt_l = l.shift(-1)
